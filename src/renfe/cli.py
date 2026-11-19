@@ -18,7 +18,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, checkout_screen, config, delays as delays_mod, live, package_version
+from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
 from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
@@ -408,6 +408,11 @@ def checkout_cmd(
         parts = _service_parts(train) if train is not None else None
         if train is not None and parts is None:
             raise UsageError("--train must be a train number or a sequence such as 00601+00533")
+        if interactive and method == checkout_mod.Method.apple_pay:
+            if review_only:
+                raise UsageError("Review-only pricing requires a payment method supported in Chrome.")
+            if sys.platform != "darwin":
+                raise UsageError("Apple Pay checkout needs Safari on macOS.")
         selected_method = method or checkout_mod.Method.paypal
         journey = None
         with _client() as client:
@@ -417,13 +422,21 @@ def checkout_cmd(
                 journey = search_mod.search(client, src, dst, day, names=_names(src, dst),
                                             now=now, from_now=day == now.date())
         if journey is not None:
-            if not journey["fares_included"] and journey["notice"]:
+            from . import checkout_screen
+
+            notice = journey["notice"]
+            if not journey["trains"] and notice and notice.startswith("No more trains today"):
+                raise UsageError(notice)
+            if not journey["fares_included"] and notice:
                 raise UpstreamError("Could not load Renfe's fares for checkout. Use `renfe open` to continue.")
-            trains = [row for row in journey["trains"] if row["available"] is True and row["fares"]
-                      and (parts is None or _service_parts(row["service"]) == parts)]
+            matches = [row for row in journey["trains"]
+                       if parts is None or _service_parts(row["service"]) == parts]
+            if train is not None and not matches:
+                raise UsageError(f"Train {train} is not listed for this trip.")
+            trains = [row for row in matches if row["available"] is True and row["fares"]]
             if not trains:
-                raise UsageError(f"No seats on train {train} for this trip." if train is not None
-                                 else "Renfe has no trains with seats available for this trip.")
+                raise UsageError(f"Train {train} is unavailable to book for this trip." if train is not None
+                                 else "Renfe has no trains available to book for this trip.")
             selection = checkout_screen.choose(journey, trains, method, review_only)
             if selection is None:
                 return {"status": "cancelled"}

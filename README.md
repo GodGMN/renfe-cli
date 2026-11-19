@@ -239,11 +239,12 @@ Use the interactive checkout to compare trains and published fares, choose a pay
 continue on Renfe. Choose the fare and enter passenger details in Renfe's shop.
 
 ```sh
-uv run --extra checkout renfe checkout Madrid Barcelona -d tomorrow --interactive
+uv run --extra checkout renfe checkout Madrid Barcelona -d tomorrow --interactive --review-only
 ```
 
 Use `--train` or `--method` to preselect either choice. The screen and prompts use stderr, and the
-result is JSON on stdout. Declining to open Renfe returns `{"status":"cancelled"}`.
+result is JSON on stdout. Answer `n` at the last prompt to try the screen without opening Chrome.
+Declining, pressing Ctrl+C at a prompt, or closing stdin returns `{"status":"cancelled"}`.
 
 To test it, use review mode. It selects the method, reads Renfe’s recalculated total, then closes Chrome
 before payment. You enter real passenger details on Renfe to reach that screen.

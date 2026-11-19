@@ -434,11 +434,24 @@ def test_interactive_checkout_can_cancel_a_preselected_train(fake, monkeypatch):
     assert "Train row" not in result.stderr and "03100" not in result.stderr
 
 
-def test_interactive_checkout_does_not_offer_a_sold_out_train(fake, monkeypatch):
+@pytest.mark.parametrize(("train", "message"), [
+    ("03400", "Train 03400 is unavailable to book"),
+    ("03200", "Train 03200 is unavailable to book"),
+    ("99999", "Train 99999 is not listed"),
+])
+def test_interactive_checkout_distinguishes_missing_and_unavailable_trains(fake, monkeypatch, train, message):
     monkeypatch.setattr(cli.checkout_mod, "checkout", lambda *args: pytest.fail("unexpected browser launch"))
-    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--interactive", "--train", "03400")
+    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--interactive", "--train", train)
     assert result.exit_code == 2 and not result.stdout
-    assert "No seats on train 03400" in json.loads(result.stderr)["error"]["message"]
+    assert message in json.loads(result.stderr)["error"]["message"]
+
+
+def test_interactive_checkout_rejects_apple_pay_review_before_search(fake):
+    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--interactive",
+                    "--method", "apple-pay", "--review-only")
+    assert result.exit_code == 2 and not result.stdout
+    assert "Review-only pricing" in json.loads(result.stderr)["error"]["message"]
+    assert not fake.requests
 
 
 @pytest.mark.parametrize("opts", [["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"]])

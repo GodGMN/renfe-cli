@@ -28,8 +28,11 @@ def choose(
     table.add_column("From", justify="right")
     for index, train in enumerate(trains, 1):
         fares = train["fares"]
+        arrival = train["arrival"][11:16]
+        if train["departure"][:10] != train["arrival"][:10]:
+            arrival = f"{arrival} ({train['arrival'][5:10]})"
         table.add_row(
-            str(index), train["service"], train["departure"][11:16], train["arrival"][11:16],
+            str(index), train["service"], train["departure"][11:16], arrival,
             str(train["changes"]), f"{min(fare['price'] for fare in fares):.2f} €",
         )
     console.print(table)

@@ -406,6 +406,41 @@ def test_checkout_uses_one_way_guest_flow(fake, monkeypatch):
     assert not fake.requests
 
 
+def test_interactive_checkout_reviews_the_selected_train_and_hands_off(fake, monkeypatch):
+    calls = []
+
+    def checkout(src, dst, day, method, train, review_only, progress):
+        calls.append((src.code, dst.code, day.isoformat(), method.value, train, review_only))
+        return {"status": "reviewed", "selected_method": method.value, "total": "32.00 €"}
+
+    monkeypatch.setattr(cli.checkout_mod, "checkout", checkout)
+    result = runner.invoke(cli.app, ["checkout", "Madrid", "Barcelona", "-d", "tomorrow",
+                                    "--interactive", "--review-only"], input="9\n2\nbizum\ny\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"status": "reviewed", "selected_method": "bizum", "total": "32.00 €"}
+    assert "Please select one of the available options" in result.stderr
+    assert "03100" in result.stderr and "31.15 €" in result.stderr and "Prémium" in result.stderr
+    assert "03200" not in result.stderr and "03400" not in result.stderr
+    assert calls == [("MADRI", "BARCE", "2026-11-16", "bizum", ["3100"], True)]
+
+
+def test_interactive_checkout_can_cancel_a_preselected_train(fake, monkeypatch):
+    monkeypatch.setattr(cli.checkout_mod, "checkout", lambda *args: pytest.fail("unexpected browser launch"))
+    result = runner.invoke(cli.app, ["checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--interactive",
+                                    "--train", "00600+00500", "--method", "card"], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"status": "cancelled"}
+    assert "Train 00600+00500" in result.stderr and "Payment method · card" in result.stderr
+    assert "Train row" not in result.stderr and "03100" not in result.stderr
+
+
+def test_interactive_checkout_does_not_offer_a_sold_out_train(fake, monkeypatch):
+    monkeypatch.setattr(cli.checkout_mod, "checkout", lambda *args: pytest.fail("unexpected browser launch"))
+    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--interactive", "--train", "03400")
+    assert result.exit_code == 2 and not result.stdout
+    assert "No seats on train 03400" in json.loads(result.stderr)["error"]["message"]
+
+
 @pytest.mark.parametrize("opts", [["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"]])
 def test_invalid_checkout_never_opens_browser(fake, opts):
     assert invoke("checkout", "Madrid", "Barcelona", *opts).exit_code == 2

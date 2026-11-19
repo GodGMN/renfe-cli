@@ -18,7 +18,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
+from . import checkout as checkout_mod, checkout_screen, config, delays as delays_mod, live, package_version
 from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
@@ -394,9 +394,10 @@ def checkout_cmd(
     destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
     date_: Annotated[str, typer.Option("--date", "-d", help="Travel date.")] = "today",
     train: Annotated[str | None, typer.Option("--train", "-t", help="Expand this train in Chrome or show its number for manual selection in Safari.")] = None,
-    method: Annotated[checkout_mod.Method, typer.Option(
-        help="Payment method to select on Renfe.")] = checkout_mod.Method.paypal,
+    method: Annotated[checkout_mod.Method | None, typer.Option(
+        help="Payment method to select on Renfe. Defaults to PayPal outside interactive mode.")] = None,
     review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
+    interactive: Annotated[bool, typer.Option(help="Review trains and fares before opening Renfe.")] = False,
 ) -> None:
     """Start a one-way guest checkout in Chrome, or open Safari for Apple Pay on macOS."""
     def produce() -> dict:
@@ -407,9 +408,29 @@ def checkout_cmd(
         parts = _service_parts(train) if train is not None else None
         if train is not None and parts is None:
             raise UsageError("--train must be a train number or a sequence such as 00601+00533")
-        with make_client() as client:
+        selected_method = method or checkout_mod.Method.paypal
+        journey = None
+        with _client() as client:
             src, dst = _stations(client, origin, destination)
-        return checkout_mod.checkout(src, dst, day, method, parts, review_only, lambda msg: typer.echo(msg, err=True))
+            if interactive:
+                now = datetime.now(search_mod.MADRID)
+                journey = search_mod.search(client, src, dst, day, names=_names(src, dst),
+                                            now=now, from_now=day == now.date())
+        if journey is not None:
+            if not journey["fares_included"] and journey["notice"]:
+                raise UpstreamError("Could not load Renfe's fares for checkout. Use `renfe open` to continue.")
+            trains = [row for row in journey["trains"] if row["available"] is True and row["fares"]
+                      and (parts is None or _service_parts(row["service"]) == parts)]
+            if not trains:
+                raise UsageError(f"No seats on train {train} for this trip." if train is not None
+                                 else "Renfe has no trains with seats available for this trip.")
+            selection = checkout_screen.choose(journey, trains, method, review_only)
+            if selection is None:
+                return {"status": "cancelled"}
+            service, selected_method = selection
+            parts = _service_parts(service)
+        return checkout_mod.checkout(src, dst, day, selected_method, parts, review_only,
+                                     lambda msg: typer.echo(msg, err=True))
 
     _emit(produce)
 

@@ -398,6 +398,7 @@ def checkout_cmd(
         help="Payment method to select on Renfe. Defaults to PayPal outside interactive mode.")] = None,
     review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
     interactive: Annotated[bool, typer.Option(help="Review trains and fares before opening Renfe.")] = False,
+    fare: Annotated[str | None, typer.Option(help="Exact Renfe fare name to select in Chrome. Requires --train.")] = None,
 ) -> None:
     """Start a one-way guest checkout in Chrome, or open Safari for Apple Pay on macOS."""
     def produce() -> dict:
@@ -408,6 +409,9 @@ def checkout_cmd(
         parts = _service_parts(train) if train is not None else None
         if train is not None and parts is None:
             raise UsageError("--train must be a train number or a sequence such as 00601+00533")
+        if fare is not None and (not fare.strip() or parts is None or method == checkout_mod.Method.apple_pay
+                                or interactive):
+            raise UsageError("--fare requires a fare name and --train, and uses the Chrome checkout.")
         if interactive and method == checkout_mod.Method.apple_pay:
             if review_only:
                 raise UsageError("Review-only pricing requires a payment method supported in Chrome.")
@@ -442,8 +446,9 @@ def checkout_cmd(
                 return {"status": "cancelled"}
             service, selected_method = selection
             parts = _service_parts(service)
+        opts = {"fare": fare.strip()} if fare is not None else {}
         return checkout_mod.checkout(src, dst, day, selected_method, parts, review_only,
-                                     lambda msg: typer.echo(msg, err=True))
+                                     lambda msg: typer.echo(msg, err=True), **opts)
 
     _emit(produce)
 

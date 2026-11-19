@@ -454,7 +454,9 @@ def test_interactive_checkout_rejects_apple_pay_review_before_search(fake):
     assert not fake.requests
 
 
-@pytest.mark.parametrize("opts", [["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"]])
+@pytest.mark.parametrize("opts", [
+    ["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"], ["--fare", "Elige"],
+])
 def test_invalid_checkout_never_opens_browser(fake, opts):
     assert invoke("checkout", "Madrid", "Barcelona", *opts).exit_code == 2
     assert not fake.requests

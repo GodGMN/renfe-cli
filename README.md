@@ -258,6 +258,8 @@ Choose your fare, enter the passenger details and review extras in the window th
 CLI selects PayPal. You review the total, accept the terms, submit payment and approve it at PayPal.
 Keep that window open as PayPal returns you to Renfe.
 
+With `--train`, add `--fare Elige` to select that exact fare and advance to the passenger form in Chrome.
+
 The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
 that option. The capture covers method selection for these alternatives and the complete return for
 PayPal.

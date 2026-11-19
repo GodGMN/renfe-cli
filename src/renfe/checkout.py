@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 PAYMENT = f"{legacy.BASE}/formasDePagoEnlaces.do"
 RECEIPT = f"{legacy.BASE}/finalCompraEnlaceVXY.do"
+TRAVELERS = f"{legacy.BASE}/datosViajeEnlaces.do"
 
 
 class Method(StrEnum):
@@ -70,7 +71,7 @@ def _review_guard() -> Callable[["Route"], None]:
     return guard
 
 
-def _expand_train(page: "Page", train: list[str]) -> None:
+def _expand_train(page: "Page", train: list[str]) -> str:
     """Match all legs in the results page's own list, then expand that row to show its fares."""
     from playwright.sync_api import TimeoutError as BrowserTimeout
 
@@ -84,6 +85,32 @@ def _expand_train(page: "Page", train: list[str]) -> None:
     if len(ids) != 1 or not re.fullmatch(r"[0-9]+", ids[0]):
         raise UsageError("The selected train has no unique match on Renfe's results page.")
     page.locator(f"#tren_i_{ids[0]} .trenes").click()
+    return ids[0]
+
+
+def _select_fare(page: "Page", row: str, fare: str) -> None:
+    cookies = page.locator("#onetrust-consent-sdk").get_by_role(
+        "button", name="Permitir solo cookies técnicas", exact=True,
+    )
+    page.add_locator_handler(cookies, lambda button: button.click(), times=1)
+    silence = page.locator("#modalGeneric[aria-hidden=false]").filter(
+        has_text="coche de tipo en silencio",
+    ).get_by_text("×", exact=True)
+    page.add_locator_handler(silence, lambda button: button.click(), times=1)
+    card = page.locator(f"#tren_i_{row} [data-titulo-tarifa]").filter(
+        has=page.get_by_text(fare, exact=True), visible=True,
+    )
+    if card.count() != 1:
+        raise UsageError("Renfe doesn't show exactly one matching fare for the selected train.")
+    card.click(timeout=10000)
+    select = page.locator("#btnSeleccionar").filter(visible=True)
+    select.click(timeout=10000)
+    incident = page.locator(f"#modalInciConf_i_{row}[aria-hidden=false]")
+    form = page.locator("#nombre0")
+    incident.filter(visible=True).or_(form.filter(visible=True)).first.wait_for(state="visible", timeout=15000)
+    if incident.is_visible():
+        incident.locator('button[data-dismiss="modal"]').click(timeout=5000)
+    page.wait_for_url(lambda url: _page_url(url) == TRAVELERS, timeout=15000)
 
 
 def _select_method(page: "Page", method: Method) -> str:
@@ -136,8 +163,7 @@ def _prepare_payment(page: "Page", method: Method) -> dict[str, str]:
 
 
 def _purchase(page: "Page", results: str, method: Method, train: list[str] | None,
-              review_only: bool, progress: Callable[[str], None]) -> dict:
-    """The only automated clicks expand a train and select a payment method."""
+              review_only: bool, progress: Callable[[str], None], *, fare: str | None = None) -> dict:
     from playwright.sync_api import Error as BrowserError
 
     status = "unconfirmed"
@@ -152,8 +178,13 @@ def _purchase(page: "Page", results: str, method: Method, train: list[str] | Non
                 return {"status": status}
             raise UpstreamError("Renfe accepted the search, but Chrome couldn't load the train list.") from None
         if train:
-            _expand_train(page, train)
-        progress("Choose your fare, enter the passenger details and review extras in Chrome.")
+            row = _expand_train(page, train)
+            if fare is not None:
+                _select_fare(page, row, fare)
+        if fare is None:
+            progress("Choose your fare, enter the passenger details and review extras in Chrome.")
+        else:
+            progress("Enter the passenger details and review extras in Chrome.")
         page.wait_for_url(lambda u: _page_url(u) == PAYMENT, wait_until="domcontentloaded", timeout=0)
         payment = _prepare_payment(page, method)
         if review_only:
@@ -180,7 +211,7 @@ def _purchase(page: "Page", results: str, method: Method, train: list[str] | Non
 
 
 def checkout(origin: Station, destination: Station, day: date, method: Method, train: list[str] | None,
-             review_only: bool, progress: Callable[[str], None]) -> dict:
+             review_only: bool, progress: Callable[[str], None], *, fare: str | None = None) -> dict:
     if method == Method.apple_pay:
         if review_only:
             raise UsageError("Apple Pay opens Safari for manual checkout. Review-only pricing requires a "
@@ -222,7 +253,7 @@ def checkout(origin: Station, destination: Station, day: date, method: Method, t
                                                 headers={"origin": legacy.WWW, "referer": legacy.WWW + "/"},
                                                 max_redirects=0)
                 results = legacy.results_redirect(response.status, response.headers.get("location", ""))
-                return _purchase(page, results, method, train, review_only, progress)
+                return _purchase(page, results, method, train, review_only, progress, fare=fare)
             finally:
                 context.close()
     except BrowserError:

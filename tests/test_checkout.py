@@ -75,6 +75,33 @@ def fixtures(tab, pages):
     return requests
 
 
+def test_requested_fare_opens_the_traveler_form_for_the_selected_train(tab):
+    results_with_fare = results().replace(
+        ">Train</button>",
+        """>Train</button><div data-titulo-tarifa="Elige"
+            onclick="document.getElementById('btnSeleccionar').hidden=false">Elige</div>""",
+    )
+    results_with_fare += f"""
+        <button id="btnSeleccionar" hidden onclick="location.href='{checkout.TRAVELERS}'">Seleccionar</button>
+        <div data-titulo-tarifa="Elige">Elige</div>
+    """
+    requests = fixtures(tab, {
+        ("GET", legacy.RESULTS_URL): results_with_fare,
+        ("GET", checkout.TRAVELERS): '<input id="nombre0">',
+        ("GET", checkout.PAYMENT): payment(),
+    })
+
+    def continue_from_traveler_form(message):
+        assert message.startswith("Enter the passenger details")
+        assert tab.url == checkout.TRAVELERS
+        tab.goto(checkout.PAYMENT)
+
+    result = checkout._purchase(tab, legacy.RESULTS_URL, checkout.Method.paypal, ["601", "533"], True,
+                                continue_from_traveler_form, fare="Elige")
+    assert result == {"status": "reviewed", "selected_method": "paypal", "total": "42.50 €"}
+    assert all(method == "GET" for method, _ in requests)
+
+
 @pytest.mark.parametrize("method,suffix,code,sub,checked", [
     (checkout.Method.paypal, "paypal", "14", "", False),
     (checkout.Method.paypal, "paypal", "14", "", True),

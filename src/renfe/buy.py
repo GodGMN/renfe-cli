@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from playwright.sync_api import Locator, Page
 
 WAIT = 15000
+PAYMENT_WAIT = 60000
 PAYPAL_HOSTS = {"www.paypal.com", "www.paypal.es"}
 REDSYS_HOSTS = {"sis.redsys.es"}
 
@@ -144,9 +145,9 @@ def _provider(page: "Page", total: int, order: Order) -> str | None:
         if url.netloc not in REDSYS_HOSTS:
             return "payment_unknown"
         try:
-            page.wait_for_url(lambda url: checkout._page_url(url) == checkout.RECEIPT, timeout=WAIT)
+            page.wait_for_url(lambda url: checkout._page_url(url) == checkout.RECEIPT, timeout=PAYMENT_WAIT)
         except BrowserTimeout:
-            return "requires_action"
+            return "payment_unknown"
         return None
     if url.netloc not in PAYPAL_HOSTS:
         return "payment_unknown"
@@ -166,13 +167,14 @@ def _provider(page: "Page", total: int, order: Order) -> str | None:
     except BrowserTimeout:
         return "requires_action"
     if (verified_merchant.count() != 1 or displayed_total.count() != 1 or approve.count() != 1
-            or not re.fullmatch(r"Renfe(?: Viajeros(?:,? S\.?A\.?)?)?", verified_merchant.inner_text().strip(), re.I)):
+            or not re.fullmatch(r"Renfe(?: Viajeros(?: S\.?M\.?E\.?)?(?:,? S\.?A\.?)?)?",
+                                " ".join(verified_merchant.inner_text().split()), re.I)):
         return "requires_action"
     amount = displayed_total.inner_text()
     if not re.search(r"(?:€|\bEUR\b)", amount, re.I) or cents(amount) != total:
         return "payment_unknown"
     approve.click(timeout=WAIT)
-    page.wait_for_url(lambda url: checkout._page_url(url) == checkout.RECEIPT, timeout=WAIT)
+    page.wait_for_url(lambda url: checkout._page_url(url) == checkout.RECEIPT, timeout=PAYMENT_WAIT)
     return None
 
 
@@ -207,8 +209,9 @@ def _existing(directory: Path, intent: str) -> dict:
                 matches = False
             if not matches:
                 result.update(ticket=str(private), ticket_status="saved_private")
-        else:
+        elif not result.get("unverified_ticket") or not Path(result["unverified_ticket"]).is_file():
             result.pop("ticket", None)
+            result.pop("unverified_ticket", None)
             result["ticket_status"] = "unavailable"
     return result
 
@@ -221,15 +224,19 @@ def _export_ticket(source: Path, destination: Path) -> None:
         os.link(output.name, destination)
 
 
-def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir: Path, intent: str) -> dict:
-    from playwright.sync_api import Error as BrowserError
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
-
+def _payment_controls(page: "Page") -> tuple["Locator", "Locator"]:
     pay = page.get_by_role("button", name=re.compile(r"^(Pagar|Comprar)$", re.I)).filter(visible=True)
     terms = page.get_by_role("checkbox", name=re.compile(r"acepto.*(?:condiciones|términos)", re.I)).filter(visible=True)
     if pay.count() != 1 or terms.count() != 1:
         raise ApiShapeError("Renfe's payment controls are not recognizable.")
+    return pay, terms
+
+
+def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir: Path, intent: str) -> dict:
+    from playwright.sync_api import Error as BrowserError
+    from pypdf import PdfReader
+
+    pay, terms = _payment_controls(page)
     terms.check()
     instrument = (_saved_card(page, order.last4) if order.last4 else
                   page.locator("#datosPago_cdgoFormaPago_paypal"))
@@ -250,7 +257,7 @@ def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir:
         pay.click(timeout=WAIT)
         hosts = PAYPAL_HOSTS if order.payment == Payment.paypal else REDSYS_HOSTS
         page.wait_for_url(lambda url: checkout._page_url(url) == checkout.RECEIPT
-                          or urlsplit(url).netloc in hosts, timeout=WAIT)
+                          or urlsplit(url).netloc in hosts, timeout=PAYMENT_WAIT)
         if checkout._page_url(page.url) != checkout.RECEIPT:
             status = _provider(page, total, order)
             if status:
@@ -274,16 +281,26 @@ def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir:
             expected.value.save_as(partial)
             partial.chmod(0o600)
             with partial.open("rb") as saved:
-                valid_pdf = len(PdfReader(saved, strict=True).pages) > 0
+                resembles_pdf = b"%PDF-" in saved.read(1024)
+                saved.seek(0)
+                try:
+                    valid_pdf = resembles_pdf and len(PdfReader(saved).pages) > 0
+                except Exception:
+                    # A reader failure must not discard the only candidate from a paid booking.
+                    valid_pdf = False
             if valid_pdf:
                 partial.replace(ticket)
                 state.update(ticket=str(ticket), ticket_status="saved_private")
                 destination = ticket_dir / f"renfe-{directory.name}.pdf"
                 _export_ticket(ticket, destination)
                 state.update(ticket=str(destination), ticket_status="saved")
+            elif resembles_pdf:
+                candidate = directory / "ticket-unverified.pdf"
+                partial.replace(candidate)
+                state.update(ticket_status="unverified", unverified_ticket=str(candidate))
         finally:
             partial.unlink(missing_ok=True)
-    except (BrowserError, ApiShapeError, OSError, PdfReadError):
+    except (BrowserError, ApiShapeError, OSError):
         pass
     return _record(directory, state, intent)
 
@@ -304,6 +321,7 @@ def run(page: "Page", results: str, traveler: Traveler, order: Order,
         _saved_card(page, order.last4).check()
     total = _total(page, order)
     if directory is None:
+        _payment_controls(page)
         return {"status": "quoted", "total_cents": total, "currency": "EUR", "method": order.payment.value}
     return _submit(page, order, total, directory, ticket_dir, intent)
 

@@ -230,7 +230,8 @@ def test_aplazame_review_uses_the_card_gateway_only_when_offered(tab, quoted, of
     ("paypal", "login", "requires_action"),
     ("saved-card", "quote", "quoted"),
     ("saved-card", "approved", "confirmed"),
-    ("saved-card", "challenge", "requires_action"),
+    ("saved-card", "challenge", "payment_unknown"),
+    ("saved-card", "slow-return", "confirmed"),
     ("saved-card", "missing", "error"),
     ("paypal", "over-budget", "error"),
 ])
@@ -239,7 +240,7 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
     from renfe import buy
 
     if mode == "challenge":
-        monkeypatch.setattr(buy, "WAIT", 1500)
+        monkeypatch.setattr(buy, "PAYMENT_WAIT", 1500)
 
     traveler = buy.Traveler("Example", "Traveler", "Pasaporte/Otro", "SYNTHETIC",
                             "traveler@example.test", "+34", "000000000")
@@ -271,7 +272,7 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
     callback = f"{legacy.BASE}/respuestaPayPal.do"
     settled = f'<script>location.replace("{checkout.RECEIPT}")</script>'
     approval = f"""
-        <div id="merchantName">Renfe Viajeros</div>
+        <div id="merchantName">Renfe Viajeros S.M.E., S.A.</div>
         <div id="cart-total">{'44,50' if mode == 'mismatch' else '42,50'} €</div>
         <form method="post" action="{callback}"><button>Pay Now</button></form>
     """
@@ -287,15 +288,18 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
     encoded = base64.b64encode(ticket_bytes).decode()
     receipt = f"""<div class="localizator"><span>TEST00</span></div>
         <a id="imprimirPDF" download="ticket.pdf" href="data:application/pdf;base64,{encoded}">PDF</a>"""
-    redirect = redsys if card and mode == "challenge" else wallet
-    post = settled if card and mode != "challenge" else f'<script>location.replace("{redirect}")</script>'
+    redirect = redsys if card else wallet
+    post = settled if card and mode not in {"challenge", "slow-return"} else f'<script>location.replace("{redirect}")</script>'
     requests = fixtures(tab, {
         ("GET", legacy.RESULTS_URL): test_results,
         ("GET", checkout.TRAVELERS): travelers,
         ("GET", checkout.PAYMENT): selected,
         ("POST", checkout.PAYMENT): post,
         ("GET", wallet): "<p>Sign in</p>" if mode == "login" else approval,
-        ("GET", redsys): "<p>Verify the payment with your bank</p>",
+        ("GET", redsys): (
+            f'<script>setTimeout(() => location.replace("{checkout.RECEIPT}"), 700)</script>'
+            if mode == "slow-return" else "<p>Verify the payment with your bank</p>"
+        ),
         ("POST", callback): settled,
         ("GET", checkout.RECEIPT): receipt,
     })
@@ -328,7 +332,8 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
             assert result["locator"] == "TEST00"
             private = state_path / "test-intent" / "ticket.pdf"
             if mode == "invalid-pdf":
-                assert result["ticket_status"] == "unavailable" and "ticket" not in result
+                assert result["ticket_status"] == "unverified" and "ticket" not in result
+                assert (state_path / "test-intent" / "ticket-unverified.pdf").read_bytes() == ticket_bytes
                 assert not export.exists() and not private.exists()
             elif mode in {"existing-file", "interrupted-export"}:
                 assert result["ticket_status"] == "saved_private" and result["ticket"] == str(private)

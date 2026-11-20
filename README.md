@@ -309,15 +309,16 @@ Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
 4. After reviewing the quote, append `--submit PURCHASE_ID` with a fresh unique ID (at least eight
    characters). This authorizes the charge up to the specified max and accepts the checkout terms.
    Reuse the same ID and purchase details when checking the result. The CLI only attempts it once.
-   `requires_action` means the provider may require attention. `payment_unknown` means check Renfe
-   and the payment account before authorizing any new attempt.
+   `requires_action` and `payment_unknown` both mean check Renfe and the payment account before
+   authorizing any new attempt. A timeout while waiting for the bank is `payment_unknown`.
 
 After a confirmed purchase, `renfe buy` saves the PDF as `renfe-PURCHASE_ID.pdf` in the current
 directory. Use `--ticket-dir` to choose an existing directory. Agents should read the absolute
 `ticket` path from the JSON, preserve the PDF in a private location that will survive the session,
 and send the PDF itself to the traveler along with the locator. If `ticket_status` is
-`saved_private`, use the private copy at the returned path. If it is `unavailable`, return the
-locator and retrieve the ticket from Renfe without submitting another payment.
+`saved_private`, use the private copy at the returned path. If it is `unavailable` or `unverified`,
+return the locator and retrieve the ticket from Renfe without submitting another payment. An
+unverified download is retained privately for inspection and is not returned as the ticket.
 
 The offline environment intercepts all browser requests and simulates both providers, including
 an approval, a challenge, mismatched totals, and an attempted replay. Run it with installed Chromium:

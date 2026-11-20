@@ -327,13 +327,15 @@ def run(page: "Page", results: str, traveler: Traveler, order: Order,
 
 
 def buy(origin: Station, destination: Station, day: date, traveler: Traveler, order: Order,
-        profile: Path, state_dir: Path, ticket_dir: Path, browser: Path | None = None) -> dict:
+        profile: Path | None, state_dir: Path, ticket_dir: Path, browser: Path | None = None) -> dict:
+    if profile is None and (order.purchase_id or order.payment == Payment.saved_card):
+        raise UsageError("--browser-profile is required to submit a purchase or use a saved card.")
     try:
         from playwright.sync_api import Error as BrowserError, sync_playwright
     except ImportError:
         raise UsageError("Install the checkout extra with `uv sync --extra checkout`.") from None
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for directory in (profile, state_dir):
+    for directory in (state_dir,) if profile is None else (profile, state_dir):
         info = directory.stat()
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise UsageError("Browser profile and purchase state directories must be private (chmod 700).")
@@ -344,8 +346,9 @@ def buy(origin: Station, destination: Station, day: date, traveler: Traveler, or
         return _existing(state_dir / order.purchase_id, intent)
     try:
         with sync_playwright() as playwright:
+            executable = str(browser) if browser else shutil.which("chromium") if profile is None else None
             context = playwright.chromium.launch_persistent_context(
-                str(profile), channel=None if browser else "chrome", executable_path=str(browser) if browser else None,
+                str(profile) if profile else "", channel=None if executable else "chrome", executable_path=executable,
                 headless=True, chromium_sandbox=True, accept_downloads=True,
                 locale="es-ES", service_workers="block",
             )

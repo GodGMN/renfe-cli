@@ -525,7 +525,13 @@ def test_buy_maps_private_input_and_authorized_amount(fake, monkeypatch, tmp_pat
         ["3311"], "Elige", cli.buy_mod.Payment.saved_card, 4250, "4321", None,
     ), profile, cli.Path.cwd())]
 
+    guest_args = args[:11] + ("--max-cents", "4250")
+    result = invoke(*guest_args)
+    assert result.exit_code == 0, result.output
+    assert calls[-1][2].payment == cli.buy_mod.Payment.paypal
+    assert calls[-1][3] is None
+
     traveler.chmod(0o644)
     result = invoke(*args)
     assert result.exit_code == 2 and "must be owned by the current user and private" in result.stderr
-    assert len(calls) == 1
+    assert len(calls) == 2

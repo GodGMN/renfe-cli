@@ -274,11 +274,8 @@ merchant and the same euro total. An unrecognized page or a verification prompt 
 This approval and the PDF download have been tested on simulated pages. A live quote stops at
 Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
 
-1. Create a dedicated Chrome profile on the machine running the CLI. Use its browser to sign in to
-   Renfe and, for PayPal, sign in to PayPal once. For the saved-card path, add the card to Renfe
-   through Renfe's own checkout. Close the browser before running the CLI with the same profile.
-2. Create a private JSON file outside the repository. Set the file to mode `600` and the dedicated
-   profile directory to mode `700`. Use the actual passenger's details. This example is synthetic.
+1. Create a private JSON file outside the repository with mode `600`. Use the actual passenger's
+   details. This example is synthetic.
 
    ```json
    {
@@ -295,17 +292,19 @@ Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
 
    The other supported document types are `DNI` and `NIE`. Keep passwords, card numbers, and
    verification codes in the provider's own sign-in or payment pages.
-3. Choose a train and fare from `renfe search` and request a quote. The max is in euro cents.
+2. Choose a train and fare from `renfe search` and request a quote. The max is in euro cents.
+   A PayPal quote uses a temporary browser profile and needs no sign-in.
 
    ```sh
    uv run --extra checkout renfe buy Madrid Barcelona -d tomorrow \
      --train 03311 --fare Elige --max-cents 4500 \
-     --traveler-file "$HOME/.local/share/renfe/traveler.json" \
-     --browser-profile "$HOME/.local/share/renfe/browser" --payment paypal
+     --traveler-file "$HOME/.local/share/renfe/traveler.json"
    ```
 
-   For a saved card, use `--payment saved-card --card-last4 LAST_FOUR`. On a Chromium-only machine,
-   add `--browser-executable /usr/bin/chromium`. Use a profile created with the same browser.
+3. To submit a purchase or quote with a saved card, pass `--browser-profile PATH` with mode `700`.
+   Sign in once in that profile, then close the browser. For a saved card, sign in to Renfe and
+   use `--payment saved-card --card-last4 LAST_FOUR`. For a PayPal purchase, sign in to PayPal.
+   If the profile belongs to Chromium, pass `--browser-executable /usr/bin/chromium`.
 4. After reviewing the quote, append `--submit PURCHASE_ID` with a fresh unique ID (at least eight
    characters). This authorizes the charge up to the specified max and accepts the checkout terms.
    Reuse the same ID and purchase details when checking the result. The CLI only attempts it once.

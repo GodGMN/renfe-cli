@@ -463,8 +463,10 @@ def buy_cmd(
     train: Annotated[str, typer.Option("--train", "-t", help="Exact train number or sequence.")],
     fare: Annotated[str, typer.Option(help="Exact fare name from Renfe.")],
     traveler_file: Annotated[Path, typer.Option(exists=True, dir_okay=False, resolve_path=True)],
-    browser_profile: Annotated[Path, typer.Option(exists=True, file_okay=False, resolve_path=True)],
     max_cents: Annotated[int, typer.Option(min=1, help="Maximum total in euro cents.")],
+    browser_profile: Annotated[Path | None, typer.Option(
+        exists=True, file_okay=False, resolve_path=True,
+        help="Dedicated browser profile. Required for purchases and saved cards.")] = None,
     payment: Annotated[buy_mod.Payment, typer.Option(help="Payment method.")] = buy_mod.Payment.paypal,
     card_last4: Annotated[str | None, typer.Option(help="Last four digits of a card saved in Renfe.")] = None,
     submit: Annotated[str | None, typer.Option(

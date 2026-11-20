@@ -471,6 +471,9 @@ def buy_cmd(
         help="Authorize purchase and Renfe's terms using a unique purchase ID. Omit for a quote.")] = None,
     browser_executable: Annotated[Path | None, typer.Option(
         exists=True, dir_okay=False, help="Use a Chromium executable instead of Google Chrome.")] = None,
+    ticket_dir: Annotated[Path, typer.Option(
+        exists=True, file_okay=False, writable=True, resolve_path=True,
+        help="Save the ticket PDF here. Defaults to the current directory.")] = Path("."),
 ) -> None:
     """Quote a trip or submit a purchase in Renfe's website without prompts."""
     def produce() -> dict:
@@ -488,7 +491,8 @@ def buy_cmd(
             src, dst = _stations(client, origin, destination)
         state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "renfe" / "purchases"
         order = buy_mod.Order(parts, fare.strip(), payment, max_cents, card_last4, submit)
-        return buy_mod.buy(src, dst, day, traveler, order, browser_profile, state, browser_executable)
+        return buy_mod.buy(src, dst, day, traveler, order, browser_profile, state, ticket_dir.resolve(),
+                           browser_executable)
 
     _emit(produce)
 

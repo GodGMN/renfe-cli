@@ -3,7 +3,9 @@
 import json
 import os
 import re
+import shutil
 import stat
+import tempfile
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
@@ -179,12 +181,28 @@ def _private_file(path: str, flags: int) -> int:
 
 def _existing(directory: Path) -> dict:
     try:
-        return json.loads((directory / "result.json").read_text())
+        result = json.loads((directory / "result.json").read_text())
     except (OSError, ValueError):
         return {"status": "payment_unknown", "purchase_id": directory.name}
+    if result.get("ticket") and not Path(result["ticket"]).is_file():
+        private = directory / "ticket.pdf"
+        if private.is_file():
+            result.update(ticket=str(private), ticket_status="saved_private")
+        else:
+            result.pop("ticket", None)
+            result["ticket_status"] = "unavailable"
+    return result
 
 
-def _submit(page: "Page", order: Order, total: int, directory: Path) -> dict:
+def _export_ticket(source: Path, destination: Path) -> None:
+    # Keep the verified original in private state if exporting fails. Never overwrite another file.
+    with tempfile.NamedTemporaryFile(dir=destination.parent) as output, source.open("rb") as ticket:
+        shutil.copyfileobj(ticket, output)
+        output.flush()
+        os.link(output.name, destination)
+
+
+def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir: Path) -> dict:
     from playwright.sync_api import Error as BrowserError
 
     pay = page.get_by_role("button", name=re.compile(r"^(Pagar|Comprar)$", re.I)).filter(visible=True)
@@ -222,7 +240,7 @@ def _submit(page: "Page", order: Order, total: int, directory: Path) -> dict:
         reference = locator.inner_text().strip()
         if not re.fullmatch(r"[A-Z0-9]{5,12}", reference):
             return _record(directory, state)
-        state.update(status="confirmed", locator=reference)
+        state.update(status="confirmed", locator=reference, ticket_status="unavailable")
         with page.expect_download(timeout=WAIT) as expected:
             print_ticket.click()
         ticket = directory / "ticket.pdf"
@@ -232,13 +250,16 @@ def _submit(page: "Page", order: Order, total: int, directory: Path) -> dict:
             if saved.read(5) != b"%PDF-":
                 ticket.unlink()
             else:
-                state["ticket"] = str(ticket)
+                state.update(ticket=str(ticket), ticket_status="saved_private")
+                destination = ticket_dir / f"renfe-{directory.name}.pdf"
+                _export_ticket(ticket, destination)
+                state.update(ticket=str(destination), ticket_status="saved")
     except (BrowserError, ApiShapeError, OSError):
         pass
     return _record(directory, state)
 
 
-def run(page: "Page", results: str, traveler: Traveler, order: Order, state_dir: Path) -> dict:
+def run(page: "Page", results: str, traveler: Traveler, order: Order, state_dir: Path, ticket_dir: Path) -> dict:
     directory = state_dir / order.purchase_id if order.purchase_id else None
     if directory is not None and directory.exists():
         return _existing(directory)
@@ -254,11 +275,11 @@ def run(page: "Page", results: str, traveler: Traveler, order: Order, state_dir:
     total = _total(page, order)
     if directory is None:
         return {"status": "quoted", "total_cents": total, "currency": "EUR", "method": order.payment.value}
-    return _submit(page, order, total, directory)
+    return _submit(page, order, total, directory, ticket_dir)
 
 
 def buy(origin: Station, destination: Station, day: date, traveler: Traveler, order: Order,
-        profile: Path, state_dir: Path, browser: Path | None = None) -> dict:
+        profile: Path, state_dir: Path, ticket_dir: Path, browser: Path | None = None) -> dict:
     try:
         from playwright.sync_api import Error as BrowserError, sync_playwright
     except ImportError:
@@ -283,7 +304,7 @@ def buy(origin: Station, destination: Station, day: date, traveler: Traveler, or
                 if order.purchase_id is None:
                     context.route("**/*", checkout._review_guard())
                 results = checkout._search_results(context, origin, destination, day)
-                return run(page, results, traveler, order, state_dir)
+                return run(page, results, traveler, order, state_dir, ticket_dir)
             finally:
                 context.close()
     except BrowserError:

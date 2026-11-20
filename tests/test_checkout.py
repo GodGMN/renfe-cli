@@ -220,6 +220,8 @@ def test_aplazame_review_uses_the_card_gateway_only_when_offered(tab, quoted, of
 @pytest.mark.parametrize(("method", "mode", "expected"), [
     ("paypal", "quote", "quoted"),
     ("paypal", "approved", "confirmed"),
+    ("paypal", "existing-file", "confirmed"),
+    ("paypal", "invalid-pdf", "confirmed"),
     ("paypal", "mismatch", "payment_unknown"),
     ("paypal", "login", "requires_action"),
     ("saved-card", "quote", "quoted"),
@@ -270,6 +272,8 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
     """
     receipt = """<div class="localizator"><span>TEST00</span></div>
         <a id="imprimirPDF" download="ticket.pdf" href="data:application/pdf,%25PDF-1.4">PDF</a>"""
+    if mode == "invalid-pdf":
+        receipt = receipt.replace("%25PDF-1.4", "not-a-pdf")
     redirect = redsys if card and mode == "challenge" else wallet
     post = settled if card and mode != "challenge" else f'<script>location.replace("{redirect}")</script>'
     requests = fixtures(tab, {
@@ -287,20 +291,40 @@ def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, ex
                       "4321" if card else None, None if mode == "quote" else "test-intent")
     if mode == "quote":
         tab.context.route("**/*", checkout._review_guard())
+    state_path = tmp_path / "state"
+    state_path.mkdir()
+    export = tmp_path / "renfe-test-intent.pdf"
+    if mode == "existing-file":
+        export.write_bytes(b"existing file")
     if expected == "error":
         with pytest.raises(UsageError):
-            buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path)
+            buy.run(tab, legacy.RESULTS_URL, traveler, order, state_path, tmp_path)
     else:
-        result = buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path)
+        result = buy.run(tab, legacy.RESULTS_URL, traveler, order, state_path, tmp_path)
         assert result["status"] == expected
         if expected in {"confirmed", "quoted"}:
             assert result["total_cents"] == 4250
         if expected == "confirmed":
             assert result["locator"] == "TEST00"
-            assert (tmp_path / "test-intent" / "ticket.pdf").read_bytes().startswith(b"%PDF-")
+            private = state_path / "test-intent" / "ticket.pdf"
+            if mode == "invalid-pdf":
+                assert result["ticket_status"] == "unavailable" and "ticket" not in result
+                assert not export.exists() and not private.exists()
+            elif mode == "existing-file":
+                assert result["ticket_status"] == "saved_private" and result["ticket"] == str(private)
+                assert export.read_bytes() == b"existing file"
+                assert private.read_bytes().startswith(b"%PDF-")
+            else:
+                assert result["ticket_status"] == "saved" and result["ticket"] == str(export)
+                assert export.read_bytes() == private.read_bytes() == b"%PDF-1.4"
+                assert export.stat().st_mode & 0o777 == 0o600
         if order.purchase_id:
             previous_requests = requests.copy()
-            assert buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path) == result
+            assert buy.run(tab, legacy.RESULTS_URL, traveler, order, state_path, tmp_path) == result
+            if result.get("ticket_status") == "saved":
+                export.unlink()
+                recovered = buy.run(tab, legacy.RESULTS_URL, traveler, order, state_path, tmp_path)
+                assert recovered["ticket_status"] == "saved_private" and recovered["ticket"] == str(private)
             assert requests == previous_requests
     assert requests.count(("POST", checkout.PAYMENT)) == int(expected not in {"error", "quoted"})
     assert requests.count(("POST", callback)) == int(method == "paypal" and expected == "confirmed")

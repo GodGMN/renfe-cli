@@ -510,8 +510,8 @@ def test_buy_maps_private_input_and_authorized_amount(fake, monkeypatch, tmp_pat
     traveler.chmod(0o600)
     calls = []
 
-    def buy(src, dst, day, person, order, browser_profile, state, executable):
-        calls.append((src.code, dst.code, order, browser_profile))
+    def buy(src, dst, day, person, order, browser_profile, state, ticket_dir, executable):
+        calls.append((src.code, dst.code, order, browser_profile, ticket_dir))
         return {"status": "quoted", "total_cents": 4200}
 
     monkeypatch.setattr(cli.buy_mod, "buy", buy)
@@ -523,7 +523,7 @@ def test_buy_maps_private_input_and_authorized_amount(fake, monkeypatch, tmp_pat
     assert json.loads(result.stdout) == {"status": "quoted", "total_cents": 4200}
     assert calls == [("MADRI", "BARCE", cli.buy_mod.Order(
         ["3311"], "Elige", cli.buy_mod.Payment.saved_card, 4250, "4321", None,
-    ), profile)]
+    ), profile, cli.Path.cwd())]
 
     traveler.chmod(0o644)
     result = invoke(*args)

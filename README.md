@@ -267,6 +267,13 @@ With `--train`, add `--fare Elige` to select that exact fare and advance to the 
 passed offline browser tests. Live validation at the time of writing reached Renfe's traveler form.
 Start with a quote to check the real payment page before authorizing any charge.
 
+For PayPal, the CLI runs Chrome without a window using the dedicated browser profile. It submits
+Renfe's payment form after checking the price limit. If Renfe redirects to PayPal, the CLI only
+presses the approval button when it recognizes PayPal's checkout and sees the expected Renfe
+merchant and the same euro total. An unrecognized page or a verification prompt needs attention.
+This approval and the PDF download have been tested on simulated pages. A live quote stops at
+Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
+
 1. Create a dedicated Chrome profile on the machine running the CLI. Use its browser to sign in to
    Renfe and, for PayPal, sign in to PayPal once. For the saved-card path, add the card to Renfe
    through Renfe's own checkout. Close the browser before running the CLI with the same profile.
@@ -303,8 +310,14 @@ Start with a quote to check the real payment page before authorizing any charge.
    characters). This authorizes the charge up to the specified max and accepts the checkout terms.
    Reuse the same ID when checking the result of that purchase. The CLI only attempts it once.
    `requires_action` means the provider may require attention. `payment_unknown` means check Renfe
-   and the payment account before authorizing any new attempt. A confirmed result contains the
-   locator and, if downloaded, the path of the PDF in the private purchase state directory.
+   and the payment account before authorizing any new attempt.
+
+After a confirmed purchase, `renfe buy` saves the PDF as `renfe-PURCHASE_ID.pdf` in the current
+directory. Use `--ticket-dir` to choose an existing directory. Agents should read the absolute
+`ticket` path from the JSON, preserve the PDF in a private location that will survive the session,
+and send the PDF itself to the traveler along with the locator. If `ticket_status` is
+`saved_private`, use the private copy at the returned path. If it is `unavailable`, return the
+locator and retrieve the ticket from Renfe without submitting another payment.
 
 The offline environment intercepts all browser requests and simulates both providers, including
 an approval, a challenge, mismatched totals, and an attempted replay. Run it with installed Chromium:

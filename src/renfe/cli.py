@@ -3,12 +3,14 @@
 """
 
 import json
+import os
 import re
 import sys
 import time as time_mod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -18,7 +20,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
+from . import buy as buy_mod, checkout as checkout_mod, config, delays as delays_mod, live, package_version
 from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
@@ -398,6 +400,7 @@ def checkout_cmd(
         help="Payment method to select on Renfe. Defaults to PayPal outside interactive mode.")] = None,
     review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
     interactive: Annotated[bool, typer.Option(help="Review trains and fares before opening Renfe.")] = False,
+    fare: Annotated[str | None, typer.Option(help="Exact Renfe fare name to select in Chrome. Requires --train.")] = None,
 ) -> None:
     """Start a one-way guest checkout in Chrome, or open Safari for Apple Pay on macOS."""
     def produce() -> dict:
@@ -408,6 +411,9 @@ def checkout_cmd(
         parts = _service_parts(train) if train is not None else None
         if train is not None and parts is None:
             raise UsageError("--train must be a train number or a sequence such as 00601+00533")
+        if fare is not None and (not fare.strip() or parts is None or method == checkout_mod.Method.apple_pay
+                                or interactive):
+            raise UsageError("--fare requires a fare name and --train, and uses the Chrome checkout.")
         if interactive and method == checkout_mod.Method.apple_pay:
             if review_only:
                 raise UsageError("Review-only pricing requires a payment method supported in Chrome.")
@@ -442,8 +448,53 @@ def checkout_cmd(
                 return {"status": "cancelled"}
             service, selected_method = selection
             parts = _service_parts(service)
+        opts = {"fare": fare.strip()} if fare is not None else {}
         return checkout_mod.checkout(src, dst, day, selected_method, parts, review_only,
-                                     lambda msg: typer.echo(msg, err=True))
+                                     lambda msg: typer.echo(msg, err=True), **opts)
+
+    _emit(produce)
+
+
+@app.command("buy")
+def buy_cmd(
+    origin: Annotated[str, typer.Argument(help="Departure station or code.")],
+    destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
+    date_: Annotated[str, typer.Option("--date", "-d", help="Date of travel.")],
+    train: Annotated[str, typer.Option("--train", "-t", help="Exact train number or sequence.")],
+    fare: Annotated[str, typer.Option(help="Exact fare name from Renfe.")],
+    traveler_file: Annotated[Path, typer.Option(exists=True, dir_okay=False, resolve_path=True)],
+    max_cents: Annotated[int, typer.Option(min=1, help="Maximum total in euro cents.")],
+    browser_profile: Annotated[Path | None, typer.Option(
+        exists=True, file_okay=False, resolve_path=True,
+        help="Dedicated browser profile. Required for purchases and saved cards.")] = None,
+    payment: Annotated[buy_mod.Payment, typer.Option(help="Payment method.")] = buy_mod.Payment.paypal,
+    card_last4: Annotated[str | None, typer.Option(help="Last four digits of a card saved in Renfe.")] = None,
+    submit: Annotated[str | None, typer.Option(
+        help="Authorize purchase and Renfe's terms using a unique purchase ID. Omit for a quote.")] = None,
+    browser_executable: Annotated[Path | None, typer.Option(
+        exists=True, dir_okay=False, help="Use a Chromium executable instead of Google Chrome.")] = None,
+    ticket_dir: Annotated[Path, typer.Option(
+        exists=True, file_okay=False, writable=True, resolve_path=True,
+        help="Save the ticket PDF here. Defaults to the current directory.")] = Path("."),
+) -> None:
+    """Quote a trip or submit a purchase in Renfe's website without prompts."""
+    def produce() -> dict:
+        day = _parse_date(date_)
+        parts = _service_parts(train)
+        if day >= config.NSV_FIRST_SALE_DATE or parts is None or not fare.strip():
+            raise UsageError(f"Buy requires an exact train and fare before {config.NSV_FIRST_SALE_DATE}.")
+        if (payment == buy_mod.Payment.saved_card) != bool(card_last4) or (
+                card_last4 and not re.fullmatch(r"[0-9]{4}", card_last4)):
+            raise UsageError("--card-last4 is required for saved-card and must contain four digits.")
+        if submit is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,63}", submit):
+            raise UsageError("--submit requires a unique purchase ID of 8–64 letters, digits, hyphens or underscores.")
+        traveler = buy_mod.Traveler.read(traveler_file)
+        with _client() as client:
+            src, dst = _stations(client, origin, destination)
+        state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "renfe" / "purchases"
+        order = buy_mod.Order(parts, fare.strip(), payment, max_cents, card_last4, submit)
+        return buy_mod.buy(src, dst, day, traveler, order, browser_profile, state, ticket_dir.resolve(),
+                           browser_executable)
 
     _emit(produce)
 

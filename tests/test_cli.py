@@ -454,7 +454,9 @@ def test_interactive_checkout_rejects_apple_pay_review_before_search(fake):
     assert not fake.requests
 
 
-@pytest.mark.parametrize("opts", [["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"]])
+@pytest.mark.parametrize("opts", [
+    ["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"], ["--fare", "Elige"],
+])
 def test_invalid_checkout_never_opens_browser(fake, opts):
     assert invoke("checkout", "Madrid", "Barcelona", *opts).exit_code == 2
     assert not fake.requests
@@ -495,3 +497,41 @@ def test_typo_suggestions_are_separate_from_real_stations(fake):
     result = invoke("search", "Mdrid", "Barcelona")
     assert result.exit_code == 2 and "Did you mean Madrid (Todas) (MADRI)" in result.stderr
     assert config.SEARCH_TRAVEL_PATH not in fake.paths()
+
+
+def test_buy_maps_private_input_and_authorized_amount(fake, monkeypatch, tmp_path):
+    profile = tmp_path / "browser"
+    profile.mkdir(mode=0o700)
+    traveler = tmp_path / "traveler.json"
+    traveler.write_text(json.dumps({
+        "name": "Example", "surname": "Traveler", "document_type": "Pasaporte/Otro",
+        "document": "SYNTHETIC", "email": "traveler@example.test", "phone_prefix": "+34", "phone": "000000000",
+    }))
+    traveler.chmod(0o600)
+    calls = []
+
+    def buy(src, dst, day, person, order, browser_profile, state, ticket_dir, executable):
+        calls.append((src.code, dst.code, order, browser_profile, ticket_dir))
+        return {"status": "quoted", "total_cents": 4200}
+
+    monkeypatch.setattr(cli.buy_mod, "buy", buy)
+    args = ("buy", "Madrid", "Barcelona", "-d", "tomorrow", "-t", "03311", "--fare", "Elige",
+            "--traveler-file", str(traveler), "--browser-profile", str(profile), "--max-cents", "4250",
+            "--payment", "saved-card", "--card-last4", "4321")
+    result = invoke(*args)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {"status": "quoted", "total_cents": 4200}
+    assert calls == [("MADRI", "BARCE", cli.buy_mod.Order(
+        ["3311"], "Elige", cli.buy_mod.Payment.saved_card, 4250, "4321", None,
+    ), profile, cli.Path.cwd())]
+
+    guest_args = args[:11] + ("--max-cents", "4250")
+    result = invoke(*guest_args)
+    assert result.exit_code == 0, result.output
+    assert calls[-1][2].payment == cli.buy_mod.Payment.paypal
+    assert calls[-1][3] is None
+
+    traveler.chmod(0o644)
+    result = invoke(*args)
+    assert result.exit_code == 2 and "must be owned by the current user and private" in result.stderr
+    assert len(calls) == 2

@@ -112,6 +112,7 @@ renfe search Madrid Barcelona -d 2027-01-29 --after 08:00 --limit 2 \
 | `renfe search FROM TO` | Trains on a date, with times, changes and fares for one adult; for today, live delays too |
 | `renfe open FROM TO` | Opens Renfe's shop for that search in your browser, or prints the link |
 | `renfe checkout FROM TO` | Guest checkout in Chrome, for trips before 25 Jan 2027 |
+| `renfe buy FROM TO` | Experimental browser purchase with PayPal or a saved card |
 | `renfe delays [TRAIN]` | Every delayed train on the live map, with its scheduled departure and arrival |
 | `renfe status TRAIN` | One train's live delay, its next station and the expected arrival there |
 | `renfe watch TRAIN` | A JSON line each time that train's live status changes |
@@ -257,6 +258,74 @@ To buy, omit `--review-only`. Add `--train 03081` to expand a specific service f
 Choose your fare, enter the passenger details and review extras in the window that opens. At payment the
 CLI selects PayPal. You review the total, accept the terms, submit payment and approve it at PayPal.
 Keep that window open as PayPal returns you to Renfe.
+
+With `--train`, add `--fare Elige` to select that exact fare and advance to the passenger form in Chrome.
+
+### Non-interactive purchase experiment
+
+`renfe buy` uses the legacy shop for a one-way trip with one adult. The two payment branches have
+passed offline browser tests. Live validation at the time of writing reached Renfe's traveler form.
+Start with a quote to check the real payment page before authorizing any charge.
+
+For PayPal, the CLI runs Chrome without a window using the dedicated browser profile. It submits
+Renfe's payment form after checking the price limit. If Renfe redirects to PayPal, the CLI only
+presses the approval button when it recognizes PayPal's checkout and sees the expected Renfe
+merchant and the same euro total. An unrecognized page or a verification prompt needs attention.
+This approval and the PDF download have been tested on simulated pages. A live quote stops at
+Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
+
+1. Create a private JSON file outside the repository with mode `600`. Use the actual passenger's
+   details. This example is synthetic.
+
+   ```json
+   {
+     "name": "Example",
+     "surname": "Traveler",
+     "second_surname": "",
+     "document_type": "Pasaporte/Otro",
+     "document": "SYNTHETIC",
+     "email": "traveler@example.test",
+     "phone_prefix": "+34",
+     "phone": "000000000"
+   }
+   ```
+
+   The other supported document types are `DNI` and `NIE`. Keep passwords, card numbers, and
+   verification codes in the provider's own sign-in or payment pages.
+2. Choose a train and fare from `renfe search` and request a quote. The max is in euro cents.
+   A PayPal quote uses a temporary browser profile and needs no sign-in.
+
+   ```sh
+   uv run --extra checkout renfe buy Madrid Barcelona -d tomorrow \
+     --train 03311 --fare Elige --max-cents 4500 \
+     --traveler-file "$HOME/.local/share/renfe/traveler.json"
+   ```
+
+3. To submit a purchase or quote with a saved card, pass `--browser-profile PATH` with mode `700`.
+   Sign in once in that profile, then close the browser. For a saved card, sign in to Renfe and
+   use `--payment saved-card --card-last4 LAST_FOUR`. For a PayPal purchase, sign in to PayPal.
+   If the profile belongs to Chromium, pass `--browser-executable /usr/bin/chromium`.
+4. After reviewing the quote, append `--submit PURCHASE_ID` with a fresh unique ID (at least eight
+   characters). This authorizes the charge up to the specified max and accepts the checkout terms.
+   Reuse the same ID and purchase details when checking the result. The CLI only attempts it once.
+   `requires_action` and `payment_unknown` both mean check Renfe and the payment account before
+   authorizing any new attempt. A timeout while waiting for the bank is `payment_unknown`.
+
+After a confirmed purchase, `renfe buy` saves the PDF as `renfe-PURCHASE_ID.pdf` in the current
+directory. Use `--ticket-dir` to choose an existing directory. Agents should read the absolute
+`ticket` path from the JSON, preserve the PDF in a private location that will survive the session,
+and send the PDF itself to the traveler along with the locator. If `ticket_status` is
+`saved_private`, use the private copy at the returned path. If it is `unavailable` or `unverified`,
+return the locator and retrieve the ticket from Renfe without submitting another payment. An
+unverified download is retained privately for inspection and is not returned as the ticket.
+
+The offline environment intercepts all browser requests and simulates both providers, including
+an approval, a challenge, mismatched totals, and an attempted replay. Run it with installed Chromium:
+
+```sh
+RENFE_TEST_CHROME=1 RENFE_TEST_BROWSER=/usr/bin/chromium \
+  uv run --locked --extra checkout pytest -q tests/test_checkout.py -k noninteractive
+```
 
 The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
 that option. The capture covers method selection for these alternatives and the complete return for

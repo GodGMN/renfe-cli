@@ -1,12 +1,13 @@
 """Non-interactive purchases on Renfe's legacy website."""
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
@@ -154,6 +155,16 @@ def _provider(page: "Page", total: int, order: Order) -> str | None:
     verified_merchant = page.locator("#merchantName").filter(visible=True)
     displayed_total = page.locator("#cart-total, [data-testid=total-amount]").filter(visible=True)
     approve = page.get_by_role("button", name=re.compile(r"^(Pagar ahora|Pay Now|Aceptar y pagar|Agree and Pay)$", re.I))
+    approve = approve.filter(visible=True)
+    login = page.get_by_text(re.compile(r"^(Sign in|Log in|Iniciar sesión)$", re.I)).filter(visible=True)
+    try:
+        approve.or_(login).first.wait_for(state="visible", timeout=WAIT)
+        if approve.count() == 0:
+            return "requires_action"
+        verified_merchant.first.wait_for(state="visible", timeout=WAIT)
+        displayed_total.first.wait_for(state="visible", timeout=WAIT)
+    except BrowserTimeout:
+        return "requires_action"
     if (verified_merchant.count() != 1 or displayed_total.count() != 1 or approve.count() != 1
             or not re.fullmatch(r"Renfe(?: Viajeros(?:,? S\.?A\.?)?)?", verified_merchant.inner_text().strip(), re.I)):
         return "requires_action"
@@ -165,10 +176,10 @@ def _provider(page: "Page", total: int, order: Order) -> str | None:
     return None
 
 
-def _record(directory: Path, state: dict) -> dict:
+def _record(directory: Path, state: dict, intent: str) -> dict:
     pending = directory / "result.tmp"
     with open(pending, "x", opener=_private_file) as output:
-        json.dump(state, output)
+        json.dump({**state, "intent": intent}, output)
         output.flush()
         os.fsync(output.fileno())
     pending.replace(directory / "result.json")
@@ -179,15 +190,23 @@ def _private_file(path: str, flags: int) -> int:
     return os.open(path, flags, 0o600)
 
 
-def _existing(directory: Path) -> dict:
+def _existing(directory: Path, intent: str) -> dict:
     try:
         result = json.loads((directory / "result.json").read_text())
     except (OSError, ValueError):
         return {"status": "payment_unknown", "purchase_id": directory.name}
-    if result.get("ticket") and not Path(result["ticket"]).is_file():
+    if result.pop("intent", None) != intent:
+        raise UsageError("This purchase ID is already assigned to different or unverified purchase details.")
+    if result.get("status") == "confirmed":
         private = directory / "ticket.pdf"
         if private.is_file():
-            result.update(ticket=str(private), ticket_status="saved_private")
+            export = Path(result["ticket"]) if result.get("ticket") else None
+            try:
+                matches = export and export.is_file() and export.read_bytes() == private.read_bytes()
+            except OSError:
+                matches = False
+            if not matches:
+                result.update(ticket=str(private), ticket_status="saved_private")
         else:
             result.pop("ticket", None)
             result["ticket_status"] = "unavailable"
@@ -202,8 +221,10 @@ def _export_ticket(source: Path, destination: Path) -> None:
         os.link(output.name, destination)
 
 
-def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir: Path) -> dict:
+def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir: Path, intent: str) -> dict:
     from playwright.sync_api import Error as BrowserError
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
 
     pay = page.get_by_role("button", name=re.compile(r"^(Pagar|Comprar)$", re.I)).filter(visible=True)
     terms = page.get_by_role("checkbox", name=re.compile(r"acepto.*(?:condiciones|términos)", re.I)).filter(visible=True)
@@ -219,11 +240,12 @@ def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir:
     try:
         directory.mkdir(mode=0o700)
     except FileExistsError:
-        return _existing(directory)
+        return _existing(directory, intent)
 
     state = {"status": "payment_unknown", "purchase_id": directory.name,
              "method": order.payment.value, "total_cents": total, "currency": "EUR"}
     # Directory creation is the claim. A crashed or overlapping process must not send the charge again.
+    _record(directory, state, intent)
     try:
         pay.click(timeout=WAIT)
         hosts = PAYPAL_HOSTS if order.payment == Payment.paypal else REDSYS_HOSTS
@@ -232,37 +254,45 @@ def _submit(page: "Page", order: Order, total: int, directory: Path, ticket_dir:
         if checkout._page_url(page.url) != checkout.RECEIPT:
             status = _provider(page, total, order)
             if status:
-                return _record(directory, {**state, "status": status})
+                return _record(directory, {**state, "status": status}, intent)
         locator = page.locator(".localizator span").filter(visible=True)
         print_ticket = page.locator("#imprimirPDF").filter(visible=True)
+        locator.first.wait_for(state="visible", timeout=WAIT)
+        print_ticket.first.wait_for(state="visible", timeout=WAIT)
         if locator.count() != 1 or print_ticket.count() != 1:
-            return _record(directory, state)
+            return _record(directory, state, intent)
         reference = locator.inner_text().strip()
         if not re.fullmatch(r"[A-Z0-9]{5,12}", reference):
-            return _record(directory, state)
+            return _record(directory, state, intent)
         state.update(status="confirmed", locator=reference, ticket_status="unavailable")
+        _record(directory, state, intent)
         with page.expect_download(timeout=WAIT) as expected:
             print_ticket.click()
         ticket = directory / "ticket.pdf"
-        expected.value.save_as(ticket)
-        ticket.chmod(0o600)
-        with ticket.open("rb") as saved:
-            if saved.read(5) != b"%PDF-":
-                ticket.unlink()
-            else:
+        partial = directory / "ticket.part"
+        try:
+            expected.value.save_as(partial)
+            partial.chmod(0o600)
+            with partial.open("rb") as saved:
+                valid_pdf = len(PdfReader(saved, strict=True).pages) > 0
+            if valid_pdf:
+                partial.replace(ticket)
                 state.update(ticket=str(ticket), ticket_status="saved_private")
                 destination = ticket_dir / f"renfe-{directory.name}.pdf"
                 _export_ticket(ticket, destination)
                 state.update(ticket=str(destination), ticket_status="saved")
-    except (BrowserError, ApiShapeError, OSError):
+        finally:
+            partial.unlink(missing_ok=True)
+    except (BrowserError, ApiShapeError, OSError, PdfReadError):
         pass
-    return _record(directory, state)
+    return _record(directory, state, intent)
 
 
-def run(page: "Page", results: str, traveler: Traveler, order: Order, state_dir: Path, ticket_dir: Path) -> dict:
+def run(page: "Page", results: str, traveler: Traveler, order: Order,
+        state_dir: Path, ticket_dir: Path, intent: str) -> dict:
     directory = state_dir / order.purchase_id if order.purchase_id else None
     if directory is not None and directory.exists():
-        return _existing(directory)
+        return _existing(directory, intent)
     response = page.goto(results, referer=legacy.WWW + "/", wait_until="domcontentloaded", timeout=WAIT)
     if not response or not response.ok or checkout._page_url(page.url) != legacy.RESULTS_URL:
         raise UpstreamError("Renfe did not load the booking results.")
@@ -275,7 +305,7 @@ def run(page: "Page", results: str, traveler: Traveler, order: Order, state_dir:
     total = _total(page, order)
     if directory is None:
         return {"status": "quoted", "total_cents": total, "currency": "EUR", "method": order.payment.value}
-    return _submit(page, order, total, directory, ticket_dir)
+    return _submit(page, order, total, directory, ticket_dir, intent)
 
 
 def buy(origin: Station, destination: Station, day: date, traveler: Traveler, order: Order,
@@ -289,8 +319,11 @@ def buy(origin: Station, destination: Station, day: date, traveler: Traveler, or
         info = directory.stat()
         if info.st_uid != os.getuid() or info.st_mode & 0o077:
             raise UsageError("Browser profile and purchase state directories must be private (chmod 700).")
+    details = json.dumps([origin.code, destination.code, day.isoformat(), asdict(traveler), asdict(order),
+                          str(profile)], sort_keys=True)
+    intent = hashlib.sha256(details.encode()).hexdigest()
     if order.purchase_id and (state_dir / order.purchase_id).exists():
-        return _existing(state_dir / order.purchase_id)
+        return _existing(state_dir / order.purchase_id, intent)
     try:
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -304,7 +337,7 @@ def buy(origin: Station, destination: Station, day: date, traveler: Traveler, or
                 if order.purchase_id is None:
                     context.route("**/*", checkout._review_guard())
                 results = checkout._search_results(context, origin, destination, day)
-                return run(page, results, traveler, order, state_dir, ticket_dir)
+                return run(page, results, traveler, order, state_dir, ticket_dir, intent)
             finally:
                 context.close()
     except BrowserError:

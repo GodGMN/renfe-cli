@@ -34,6 +34,7 @@ renfe = "renfe.cli:main"
 [project.optional-dependencies]
 checkout = [
     "playwright>=1.58,<2",
+    "pypdf>=7,<8",
 ]
 
 [build-system]

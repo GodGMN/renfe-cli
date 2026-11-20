@@ -308,7 +308,7 @@ Renfe's payment page, so it cannot validate the PayPal redirect or its approval.
    add `--browser-executable /usr/bin/chromium`. Use a profile created with the same browser.
 4. After reviewing the quote, append `--submit PURCHASE_ID` with a fresh unique ID (at least eight
    characters). This authorizes the charge up to the specified max and accepts the checkout terms.
-   Reuse the same ID when checking the result of that purchase. The CLI only attempts it once.
+   Reuse the same ID and purchase details when checking the result. The CLI only attempts it once.
    `requires_action` means the provider may require attention. `payment_unknown` means check Renfe
    and the payment account before authorizing any new attempt.
 

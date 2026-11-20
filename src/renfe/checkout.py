@@ -11,7 +11,7 @@ from .errors import ApiShapeError, UpstreamError, UsageError
 from .stations import Station
 
 if TYPE_CHECKING:
-    from playwright.sync_api import Page, Route
+    from playwright.sync_api import BrowserContext, Page, Route
 
 PAYMENT = f"{legacy.BASE}/formasDePagoEnlaces.do"
 RECEIPT = f"{legacy.BASE}/finalCompraEnlaceVXY.do"
@@ -210,6 +210,13 @@ def _purchase(page: "Page", results: str, method: Method, train: list[str] | Non
     return {"status": status}
 
 
+def _search_results(context: "BrowserContext", origin: Station, destination: Station, day: date) -> str:
+    response = context.request.post(legacy.SEARCH_URL, form=legacy.search_form(origin, destination, day),
+                                    headers={"origin": legacy.WWW, "referer": legacy.WWW + "/"},
+                                    max_redirects=0, timeout=15000)
+    return legacy.results_redirect(response.status, response.headers.get("location", ""))
+
+
 def checkout(origin: Station, destination: Station, day: date, method: Method, train: list[str] | None,
              review_only: bool, progress: Callable[[str], None], *, fare: str | None = None) -> dict:
     if method == Method.apple_pay:
@@ -249,10 +256,7 @@ def checkout(origin: Station, destination: Station, day: date, method: Method, t
                 if review_only:
                     context.route("**/*", _review_guard())
                 # The request context shares the browser cookie jar. Inspect the redirect before following it.
-                response = context.request.post(legacy.SEARCH_URL, form=legacy.search_form(origin, destination, day),
-                                                headers={"origin": legacy.WWW, "referer": legacy.WWW + "/"},
-                                                max_redirects=0)
-                results = legacy.results_redirect(response.status, response.headers.get("location", ""))
+                results = _search_results(context, origin, destination, day)
                 return _purchase(page, results, method, train, review_only, progress, fare=fare)
             finally:
                 context.close()

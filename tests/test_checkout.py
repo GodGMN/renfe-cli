@@ -15,7 +15,9 @@ def browser():
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(channel="chrome", chromium_sandbox=True, headless=True)
+        executable = os.getenv("RENFE_TEST_BROWSER")
+        browser = pw.chromium.launch(channel=None if executable else "chrome", executable_path=executable,
+                                     chromium_sandbox=True, headless=True)
         yield browser
         browser.close()
 
@@ -213,3 +215,92 @@ def test_aplazame_review_uses_the_card_gateway_only_when_offered(tab, quoted, of
         assert out["requested_method"] == "aplazame" and out["selected_method"] == "card"
         assert "Otras formas de pago" in out["next"]
     assert ("POST", checkout.PAYMENT) not in requests
+
+
+@pytest.mark.parametrize(("method", "mode", "expected"), [
+    ("paypal", "quote", "quoted"),
+    ("paypal", "approved", "confirmed"),
+    ("paypal", "mismatch", "payment_unknown"),
+    ("paypal", "login", "requires_action"),
+    ("saved-card", "quote", "quoted"),
+    ("saved-card", "approved", "confirmed"),
+    ("saved-card", "challenge", "requires_action"),
+    ("saved-card", "missing", "error"),
+    ("paypal", "over-budget", "error"),
+])
+def test_noninteractive_buy_offline(tab, tmp_path, monkeypatch, method, mode, expected):
+    from renfe import buy
+
+    if mode == "challenge":
+        monkeypatch.setattr(buy, "WAIT", 1500)
+
+    traveler = buy.Traveler("Example", "Traveler", "Pasaporte/Otro", "SYNTHETIC",
+                            "traveler@example.test", "+34", "000000000")
+    test_results = results().replace(
+        ">Train</button>",
+        """>Train</button><div data-titulo-tarifa="Elige"
+            onclick="document.getElementById('btnSeleccionar').hidden=false">Elige</div>""",
+    )
+    test_results += f"""
+        <button id="btnSeleccionar" hidden onclick="location.href='{checkout.TRAVELERS}'">Seleccionar</button>
+    """
+    travelers = f"""
+      <form id="formBean" method="get" action="{checkout.PAYMENT}">
+        <input id="nombre0" required><input id="apellido10" required><input id="apellido20">
+        <select id="tipoDocumento0"><option value="0022">Pasaporte/Otro</option></select>
+        <input id="documento0" required><input id="email0" required><input id="telefono0" required>
+        <select id="prefijo0"><option value="+34">+34</option></select>
+        <button id="submitpersonaliza">Personalizar viaje</button>
+      </form>
+    """
+    card = method == "saved-card"
+    selected = payment("tarjetaRedSys", "02", "02") if card else payment()
+    extra = '<label><input type="checkbox" required>Acepto las condiciones</label>'
+    if card and mode != "missing":
+        extra += '<label><input type="radio" name="card" required>Visa •••• 4321</label>'
+    selected = selected.replace("<button>Pagar</button>", extra + "<button>Pagar</button>")
+    wallet = "https://www.paypal.com/checkoutnow"
+    redsys = "https://sis.redsys.es/sis/authentication"
+    callback = f"{legacy.BASE}/respuestaPayPal.do"
+    settled = f'<script>location.replace("{checkout.RECEIPT}")</script>'
+    approval = f"""
+        <div id="merchantName">Renfe Viajeros</div>
+        <div id="cart-total">{'44,50' if mode == 'mismatch' else '42,50'} €</div>
+        <form method="post" action="{callback}"><button>Pay Now</button></form>
+    """
+    receipt = """<div class="localizator"><span>TEST00</span></div>
+        <a id="imprimirPDF" download="ticket.pdf" href="data:application/pdf,%25PDF-1.4">PDF</a>"""
+    redirect = redsys if card and mode == "challenge" else wallet
+    post = settled if card and mode != "challenge" else f'<script>location.replace("{redirect}")</script>'
+    requests = fixtures(tab, {
+        ("GET", legacy.RESULTS_URL): test_results,
+        ("GET", checkout.TRAVELERS): travelers,
+        ("GET", checkout.PAYMENT): selected,
+        ("POST", checkout.PAYMENT): post,
+        ("GET", wallet): "<p>Sign in</p>" if mode == "login" else approval,
+        ("GET", redsys): "<p>Verify the payment with your bank</p>",
+        ("POST", callback): settled,
+        ("GET", checkout.RECEIPT): receipt,
+    })
+    order = buy.Order(["601", "533"], "Elige", buy.Payment(method),
+                      4200 if mode == "over-budget" else 4250,
+                      "4321" if card else None, None if mode == "quote" else "test-intent")
+    if mode == "quote":
+        tab.context.route("**/*", checkout._review_guard())
+    if expected == "error":
+        with pytest.raises(UsageError):
+            buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path)
+    else:
+        result = buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path)
+        assert result["status"] == expected
+        if expected in {"confirmed", "quoted"}:
+            assert result["total_cents"] == 4250
+        if expected == "confirmed":
+            assert result["locator"] == "TEST00"
+            assert (tmp_path / "test-intent" / "ticket.pdf").read_bytes().startswith(b"%PDF-")
+        if order.purchase_id:
+            previous_requests = requests.copy()
+            assert buy.run(tab, legacy.RESULTS_URL, traveler, order, tmp_path) == result
+            assert requests == previous_requests
+    assert requests.count(("POST", checkout.PAYMENT)) == int(expected not in {"error", "quoted"})
+    assert requests.count(("POST", callback)) == int(method == "paypal" and expected == "confirmed")

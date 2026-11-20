@@ -3,12 +3,14 @@
 """
 
 import json
+import os
 import re
 import sys
 import time as time_mod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -18,7 +20,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
+from . import buy as buy_mod, checkout as checkout_mod, config, delays as delays_mod, live, package_version
 from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
@@ -449,6 +451,44 @@ def checkout_cmd(
         opts = {"fare": fare.strip()} if fare is not None else {}
         return checkout_mod.checkout(src, dst, day, selected_method, parts, review_only,
                                      lambda msg: typer.echo(msg, err=True), **opts)
+
+    _emit(produce)
+
+
+@app.command("buy")
+def buy_cmd(
+    origin: Annotated[str, typer.Argument(help="Departure station or code.")],
+    destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
+    date_: Annotated[str, typer.Option("--date", "-d", help="Date of travel.")],
+    train: Annotated[str, typer.Option("--train", "-t", help="Exact train number or sequence.")],
+    fare: Annotated[str, typer.Option(help="Exact fare name from Renfe.")],
+    traveler_file: Annotated[Path, typer.Option(exists=True, dir_okay=False, resolve_path=True)],
+    browser_profile: Annotated[Path, typer.Option(exists=True, file_okay=False, resolve_path=True)],
+    max_cents: Annotated[int, typer.Option(min=1, help="Maximum total in euro cents.")],
+    payment: Annotated[buy_mod.Payment, typer.Option(help="Payment method.")] = buy_mod.Payment.paypal,
+    card_last4: Annotated[str | None, typer.Option(help="Last four digits of a card saved in Renfe.")] = None,
+    submit: Annotated[str | None, typer.Option(
+        help="Authorize purchase and Renfe's terms using a unique purchase ID. Omit for a quote.")] = None,
+    browser_executable: Annotated[Path | None, typer.Option(
+        exists=True, dir_okay=False, help="Use a Chromium executable instead of Google Chrome.")] = None,
+) -> None:
+    """Quote a trip or submit a purchase in Renfe's website without prompts."""
+    def produce() -> dict:
+        day = _parse_date(date_)
+        parts = _service_parts(train)
+        if day >= config.NSV_FIRST_SALE_DATE or parts is None or not fare.strip():
+            raise UsageError(f"Buy requires an exact train and fare before {config.NSV_FIRST_SALE_DATE}.")
+        if (payment == buy_mod.Payment.saved_card) != bool(card_last4) or (
+                card_last4 and not re.fullmatch(r"[0-9]{4}", card_last4)):
+            raise UsageError("--card-last4 is required for saved-card and must contain four digits.")
+        if submit is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{7,63}", submit):
+            raise UsageError("--submit requires a unique purchase ID of 8–64 letters, digits, hyphens or underscores.")
+        traveler = buy_mod.Traveler.read(traveler_file)
+        with _client() as client:
+            src, dst = _stations(client, origin, destination)
+        state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "renfe" / "purchases"
+        order = buy_mod.Order(parts, fare.strip(), payment, max_cents, card_last4, submit)
+        return buy_mod.buy(src, dst, day, traveler, order, browser_profile, state, browser_executable)
 
     _emit(produce)
 

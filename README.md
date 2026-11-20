@@ -112,6 +112,7 @@ renfe search Madrid Barcelona -d 2027-01-29 --after 08:00 --limit 2 \
 | `renfe search FROM TO` | Trains on a date, with times, changes and fares for one adult; for today, live delays too |
 | `renfe open FROM TO` | Opens Renfe's shop for that search in your browser, or prints the link |
 | `renfe checkout FROM TO` | Guest checkout in Chrome, for trips before 25 Jan 2027 |
+| `renfe buy FROM TO` | Experimental browser purchase with PayPal or a saved card |
 | `renfe delays [TRAIN]` | Every delayed train on the live map, with its scheduled departure and arrival |
 | `renfe status TRAIN` | One train's live delay, its next station and the expected arrival there |
 | `renfe watch TRAIN` | A JSON line each time that train's live status changes |
@@ -259,6 +260,59 @@ CLI selects PayPal. You review the total, accept the terms, submit payment and a
 Keep that window open as PayPal returns you to Renfe.
 
 With `--train`, add `--fare Elige` to select that exact fare and advance to the passenger form in Chrome.
+
+### Non-interactive purchase experiment
+
+`renfe buy` uses the legacy shop for a one-way trip with one adult. The two payment branches have
+passed offline browser tests. Live validation at the time of writing reached Renfe's traveler form.
+Start with a quote to check the real payment page before authorizing any charge.
+
+1. Create a dedicated Chrome profile on the machine running the CLI. Use its browser to sign in to
+   Renfe and, for PayPal, sign in to PayPal once. For the saved-card path, add the card to Renfe
+   through Renfe's own checkout. Close the browser before running the CLI with the same profile.
+2. Create a private JSON file outside the repository. Set the file to mode `600` and the dedicated
+   profile directory to mode `700`. Use the actual passenger's details. This example is synthetic.
+
+   ```json
+   {
+     "name": "Example",
+     "surname": "Traveler",
+     "second_surname": "",
+     "document_type": "Pasaporte/Otro",
+     "document": "SYNTHETIC",
+     "email": "traveler@example.test",
+     "phone_prefix": "+34",
+     "phone": "000000000"
+   }
+   ```
+
+   The other supported document types are `DNI` and `NIE`. Keep passwords, card numbers, and
+   verification codes in the provider's own sign-in or payment pages.
+3. Choose a train and fare from `renfe search` and request a quote. The max is in euro cents.
+
+   ```sh
+   uv run --extra checkout renfe buy Madrid Barcelona -d tomorrow \
+     --train 03311 --fare Elige --max-cents 4500 \
+     --traveler-file "$HOME/.local/share/renfe/traveler.json" \
+     --browser-profile "$HOME/.local/share/renfe/browser" --payment paypal
+   ```
+
+   For a saved card, use `--payment saved-card --card-last4 LAST_FOUR`. On a Chromium-only machine,
+   add `--browser-executable /usr/bin/chromium`. Use a profile created with the same browser.
+4. After reviewing the quote, append `--submit PURCHASE_ID` with a fresh unique ID (at least eight
+   characters). This authorizes the charge up to the specified max and accepts the checkout terms.
+   Reuse the same ID when checking the result of that purchase. The CLI only attempts it once.
+   `requires_action` means the provider may require attention. `payment_unknown` means check Renfe
+   and the payment account before authorizing any new attempt. A confirmed result contains the
+   locator and, if downloaded, the path of the PDF in the private purchase state directory.
+
+The offline environment intercepts all browser requests and simulates both providers, including
+an approval, a challenge, mismatched totals, and an attempted replay. Run it with installed Chromium:
+
+```sh
+RENFE_TEST_CHROME=1 RENFE_TEST_BROWSER=/usr/bin/chromium \
+  uv run --locked --extra checkout pytest -q tests/test_checkout.py -k noninteractive
+```
 
 The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
 that option. The capture covers method selection for these alternatives and the complete return for
